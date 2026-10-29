@@ -166,6 +166,73 @@ class _rendering_context:
             )
         return self.grid_unit * (np.atleast_1d(xy) - self.origin)
 
+    def points_to_data(self, length):
+        """
+        Convert a length from points to plot coordinates.
+
+        """
+        # Plot coordinates are in centimeters (the unit of ``grid_unit``),
+        # ``shp_fig_scale`` of which make up an inch, and an inch is 72 points.
+        return length * self.shp_fig_scale / 72.0
+
+
+def _arrow_head(head_length, head_width, overhang, shape, half_lw):
+    """
+    The head of a :class:`matplotlib.patches.FancyArrow` whose outline is
+    stroked with mitered corners, as two filled outlines. The arrow points
+    along +x and the tip of the stroked head is at the origin.
+
+    :param head_length:
+        The length of the head, without the stroke.
+
+    :param head_width:
+        The width of the head, without the stroke.
+
+    :param overhang:
+        How far the back of the head is swept back, as a fraction of
+        ``head_length``.
+
+    :param shape:
+        ``"full"`` for the whole head, or ``"left"`` or ``"right"`` for one
+        half of it.
+
+    :param half_lw:
+        Half the width of the stroke, in the units of ``head_length``.
+
+    :returns:
+        * ``outer``: the outline of the stroked head.
+        * ``inner``: the outline of the head without the stroke.
+        * ``notch``: the point on the back of ``inner`` where the shaft
+          meets it.
+
+    """
+    notch = np.array([-head_length * (1 - overhang), 0.0])
+    upper = np.array([-head_length, 0.5 * head_width])
+    lower = upper * [1, -1]
+    tip = np.zeros(2)
+    if shape == "full":
+        inner = np.array([tip, upper, notch, lower])
+    elif shape == "left":
+        inner = np.array([tip, notch, lower])
+    elif shape == "right":
+        inner = np.array([tip, upper, notch])
+    else:
+        raise ValueError(f"Unknown arrow head shape: {shape}")
+
+    # A miter join puts each corner of the stroke's outline where the
+    # neighbouring edges, moved out by half the line width, intersect. The
+    # vertices run counterclockwise, so the outward normal of an edge is the
+    # edge direction turned clockwise.
+    edges = np.roll(inner, -1, axis=0) - inner
+    edges /= np.hypot(edges[:, 0], edges[:, 1])[:, None]
+    normals = np.stack([edges[:, 1], -edges[:, 0]], axis=1)
+    previous = np.roll(normals, 1, axis=0)
+    cos_turn = np.sum(previous * normals, axis=1)
+    outer = inner + half_lw * (previous + normals) / (1 + cos_turn)[:, None]
+
+    shift = np.array([outer[:, 0].max(), 0.0])
+    return outer - shift, inner - shift, notch - shift
+
 
 def _pop_multiple(_dict, default, *args):
     """

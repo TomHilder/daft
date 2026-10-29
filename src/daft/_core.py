@@ -6,13 +6,15 @@ __all__ = ["PGM", "Node", "Edge", "Plate"]
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
-from matplotlib.patches import FancyArrow
+from matplotlib.patches import PathPatch
+from matplotlib.patches import Polygon
 from matplotlib.patches import Rectangle
+from matplotlib.path import Path
 
 import numpy as np
 
 from ._exceptions import SameLocationError
-from ._utils import _rendering_context, _pop_multiple
+from ._utils import _rendering_context, _pop_multiple, _arrow_head
 
 # pylint: disable=too-many-arguments, protected-access, unused-argument, too-many-lines
 
@@ -260,8 +262,13 @@ class PGM:
             Only takes effect if `label` is defined in `plot_params`.
 
         :param plot_params: (optional)
-            A dictionary of parameters to pass to the
-            :class:`matplotlib.patches.FancyArrow` constructor.
+            A dictionary of parameters for drawing the edge. For a directed
+            edge, ``head_length``, ``head_width``, ``overhang`` and ``shape``
+            set the arrow head as they do for
+            :class:`matplotlib.patches.FancyArrow`, and the rest are passed
+            to the :class:`matplotlib.patches.Patch` objects that draw the
+            arrow. For an undirected edge, they are passed to
+            :meth:`matplotlib.axes.Axes.plot`.
 
         :param label_params: (optional)
             A dictionary of parameters to pass to the
@@ -885,9 +892,12 @@ class Edge:
         Only takes effect if `label` is defined in `plot_params`.
 
     :param plot_params: (optional)
-        A dictionary of parameters to pass to the
-        :class:`matplotlib.patches.FancyArrow` constructor to adjust
-        edge behavior.
+        A dictionary of parameters for drawing the edge. For a directed edge,
+        ``head_length``, ``head_width``, ``overhang`` and ``shape`` set the
+        arrow head as they do for :class:`matplotlib.patches.FancyArrow`, and
+        the rest are passed to the :class:`matplotlib.patches.Patch` objects
+        that draw the arrow. For an undirected edge, they are passed to
+        :meth:`matplotlib.axes.Axes.plot`.
 
     :param label_params: (optional)
         A dictionary of parameters to pass to the
@@ -937,6 +947,92 @@ class Edge:
 
         return x3, y3, x4 - x3, y4 - y3
 
+    def _render_arrow(self, ctx, plot_params):
+        """
+        Draw the edge as an arrow: a stroked shaft and a filled head whose
+        tip lies on the outline of the target node.
+
+        :param plot_params:
+            The edge's parameters, with ``linewidth`` and ``linestyle``
+            resolved.
+
+        :returns:
+            The list of patches that make up the arrow.
+
+        """
+        ax = ctx.ax()
+        params = dict(plot_params)
+        color = params.pop("color", "k")
+        ec = _pop_multiple(params, color, "ec", "edgecolor")
+        fc = _pop_multiple(params, color, "fc", "facecolor")
+        linewidth = params.pop("linewidth")
+        linestyle = params.pop("linestyle")
+        head_length = params.pop("head_length", 0.25)
+        head_width = params.pop("head_width", 0.1)
+        overhang = params.pop("overhang", 0.0)
+        shape = params.pop("shape", "full")
+
+        x, y, dx, dy = self._get_coords(ctx)
+        length = np.hypot(dx, dy)
+        if length == 0:
+            return []
+
+        # The head is filled rather than stroked, so that its corners, and
+        # the tip in particular, are where the geometry puts them. How far a
+        # stroke's corners reach past a sharp tip depends on the backend and
+        # the dpi.
+        outer, inner, notch = _arrow_head(
+            head_length,
+            head_width,
+            overhang,
+            shape,
+            ctx.points_to_data(0.5 * linewidth),
+        )
+        start = np.array([x, y])
+        tip = start + [dx, dy]
+        axes = np.array([[dx, dy], [-dy, dx]]) / length
+        outer, inner, notch = (tip + p @ axes for p in (outer, inner, notch))
+
+        patches = []
+        if np.dot(notch - start, axes[0]) > 0:
+            patches.append(
+                PathPatch(
+                    Path([start, notch]),
+                    fill=False,
+                    edgecolor=ec,
+                    linewidth=linewidth,
+                    linestyle=linestyle,
+                    **{"capstyle": "butt", "snap": False, **params},
+                )
+            )
+        # The stroke's colour fills the whole head, with the face colour laid
+        # over the inside. Shapes that only touch, rather than overlap, leave
+        # a faint antialiased seam, so the head is a ring only when its face
+        # is transparent.
+        hollow = mpl.colors.to_rgba(fc)[3] == 0
+        head = Path(np.vstack([outer, outer[:1]]), closed=True)
+        if hollow:
+            head = Path.make_compound_path(
+                head, Path(np.vstack([inner[::-1], inner[-1:]]), closed=True)
+            )
+        patches.append(
+            PathPatch(head, facecolor=ec, edgecolor="none", **params)
+        )
+        if not hollow and mpl.colors.to_rgba(fc) != mpl.colors.to_rgba(ec):
+            patches.append(
+                Polygon(
+                    inner,
+                    closed=True,
+                    facecolor=fc,
+                    edgecolor="none",
+                    **params,
+                )
+            )
+
+        for patch in patches:
+            ax.add_artist(patch)
+        return patches
+
     def render(self, ctx):
         """
         Render the edge in the given axes.
@@ -969,33 +1065,7 @@ class Edge:
             )
 
         if self.directed:
-            plot_params["ec"] = _pop_multiple(
-                plot_params, "k", "ec", "edgecolor"
-            )
-            plot_params["fc"] = _pop_multiple(
-                plot_params, "k", "fc", "facecolor"
-            )
-            plot_params["head_length"] = plot_params.get("head_length", 0.25)
-            plot_params["head_width"] = plot_params.get("head_width", 0.1)
-
-            # Build an arrow.
-            args = self._get_coords(ctx)
-
-            # zero lengh arrow produce error
-            if not (args[2] == 0.0 and args[3] == 0.0):
-                ar = FancyArrow(
-                    *self._get_coords(ctx),
-                    width=0,
-                    length_includes_head=True,
-                    **plot_params,
-                )
-
-                # Add the arrow to the axes.
-                ax.add_artist(ar)
-                return ar
-
-            else:
-                print(args[2], args[3])
+            return self._render_arrow(ctx, plot_params)
 
         else:
             plot_params["color"] = plot_params.get("color", "k")
